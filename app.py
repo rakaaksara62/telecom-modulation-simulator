@@ -1,136 +1,169 @@
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.signal import hilbert, butter, filtfilt
+from scipy.signal import butter, filtfilt
 
-st.set_page_config(page_title="Simulasi Modulasi & Demodulasi Analog", layout="wide")
+st.set_page_config(page_title="Simulasi Modulasi & Demodulasi Analog Lengkap", layout="wide")
 
 st.title("Simulasi Real-Time Modulasi & Demodulasi Analog (AM, FM, PM)")
-st.caption("Visualisasi pemrosesan sinyal sesaat (instantaneous) dari sisi Transmitter hingga Receiver.")
+st.caption("Visualisasi pemrosesan transmitter, perkalian lokal pada receiver, hingga ekstraksi data.")
 
 # --- SIDEBAR KONTROL PARAMETER ---
-st.sidebar.header("Konfigurasi Sinyal")
-mod_type = st.sidebar.selectbox("Pilih Jenis Modulasi:", ["AM (Amplitude Modulation)", "FM (Frequency Modulation)", "PM (Phase Modulation)"])
+st.sidebar.header("Konfigurasi Parameter Sinyal")
+mod_type = st.sidebar.selectbox(
+    "Pilih Jenis Modulasi:", 
+    ["PM (Phase Modulation)", "AM (Amplitude Modulation)", "FM (Frequency Modulation)"]
+)
 
-fm = st.sidebar.slider("Frekuensi Sinyal Informasi / Suara (Hz)", min_value=1, max_value=10, value=2)
-fc = st.sidebar.slider("Frekuensi Carrier (Hz)", min_value=20, max_value=100, value=40)
+fm = st.sidebar.slider("Frekuensi Pesan fm (Hz)", min_value=1, max_value=8, value=2)
+fc = st.sidebar.slider("Frekuensi Carrier fc (Hz)", min_value=20, max_value=80, value=35)
 duration = 1.0  # durasi detik
-fs = 2000       # frekuensi sampling simulasi (Hz)
+fs = 4000       # frekuensi sampling simulasi (Hz)
 t = np.linspace(0, duration, int(fs * duration), endpoint=False)
 
 # Sinyal dasar
-m_t = np.sin(2 * np.pi * fm * t)          # Sinyal informasi
-carrier = np.cos(2 * np.pi * fc * t)     # Sinyal carrier unmodulated
+Am = 1.0
+Ac = 1.0
+m_t = Am * np.sin(2 * np.pi * fm * t)          # Pesan informasi
+carrier_pure = Ac * np.cos(2 * np.pi * fc * t) # Carrier referensi murni
 
-# --- RUMUS PEMROSESAN TRANSMITTER & RECEIVER ---
-if "AM" in mod_type:
-    ka = st.sidebar.slider("Indeks Modulasi (ka)", 0.1, 1.0, 0.7)
+# Desain filter LPF Butterworth
+cutoff_lpf = 2.5 * fm
+b_lpf, a_lpf = butter(4, cutoff_lpf / (fs / 2), btype='low')
+
+# ==============================================================================
+# PEMROSESAN SINYAL
+# ==============================================================================
+if "PM" in mod_type:
+    kp = st.sidebar.slider("Deviasi Fasa kp (radian)", 0.2, 2.5, 1.2)
     
-    # 1. Transmitter: Perkalian instan envelope
-    tx_signal = (1 + ka * m_t) * np.cos(2 * np.pi * fc * t)
+    # 1. Transmitter: s(t) = Ac * cos(2*pi*fc*t + kp*m(t))
+    tx_signal = Ac * np.cos(2 * np.pi * fc * t + kp * m_t)
+    tx_eq = r"$s(t) = A_c \cos(2\pi f_c t + k_p m(t))$"
     
-    # 2. Receiver (Detektor Selubung: Dioda Rectifier + Low Pass Filter)
-    rectified = np.maximum(0, tx_signal) # Efek dioda penyearah
-    # Filter LPF orde 4
-    b, a_coeff = butter(4, (2 * fm * 2) / fs, btype='low')
-    rx_recovered = filtfilt(b, a_coeff, rectified)
-    rx_recovered = (rx_recovered - np.mean(rx_recovered)) # Hapus offset DC
+    # 2. Receiver - Local Oscillator tergeser -90 derajat (kuadratur): -sin(2*pi*fc*t)
+    local_osc = -np.sin(2 * np.pi * fc * t)
+    local_eq = r"$c_{local}(t) = -\sin(2\pi f_c t)$"
+    
+    # 3. Receiver - Multiplier (Mixer)
+    # Secara trigonometri:
+    # cos(A) * (-sin(B)) = -0.5 * [sin(A+B) + sin(A-B)]
+    # A = 2*pi*fc*t + kp*m(t), B = 2*pi*fc*t
+    # v_mult(t) = 0.5 * sin(kp * m(t)) - 0.5 * sin(4*pi*fc*t + kp * m(t))
+    multiplier_out = tx_signal * local_osc
+    mult_eq = r"$v_{mult}(t) = s(t) \times c_{local}(t) = \frac{1}{2}\sin(k_p m(t)) - \frac{1}{2}\sin(4\pi f_c t + k_p m(t))$"
+    
+    # 4. Receiver - Low Pass Filter (membuang komponen frekuensi tinggi 2*fc)
+    rx_recovered = filtfilt(b_lpf, a_lpf, multiplier_out)
+    rx_recovered = rx_recovered - np.mean(rx_recovered)
     if np.max(rx_recovered) > 0:
-        rx_recovered = rx_recovered / np.max(rx_recovered) # Normalisasi
+        rx_recovered = rx_recovered / np.max(rx_recovered)
+    rec_eq = r"$m_{rec}(t) = \text{LPF}\{v_{mult}(t)\} \approx \frac{1}{2} k_p m(t)$"
 
-    tx_desc = f"Amplitudo sesaat carrier langsung dikalikan nilai tegangan: A(t) = [1 + {ka} * m(t)]."
-    rx_desc = "Penerima menggunakan Dioda (memotong lembah negatif) lalu Kapasitor/LPF menahan muatan puncak sesaat (envelope)."
-
-elif "FM" in mod_type:
-    kf = st.sidebar.slider("Deviasi Frekuensi kf (Hz/V)", 5, 30, 15)
+elif "AM" in mod_type:
+    ka = st.sidebar.slider("Indeks Modulasi ka", 0.1, 1.0, 0.7)
     
-    # 1. Transmitter: Frekuensi sesaat mengendalikan laju fasa osilator (VCO)
+    # Transmitter AM Standar
+    tx_signal = Ac * (1 + ka * m_t) * np.cos(2 * np.pi * fc * t)
+    tx_eq = r"$s(t) = A_c [1 + k_a m(t)] \cos(2\pi f_c t)$"
+    
+    # Receiver AM Menggunakan Detektor Koheren (Pengali Lokal In-Phase)
+    local_osc = 2 * np.cos(2 * np.pi * fc * t)
+    local_eq = r"$c_{local}(t) = 2 \cos(2\pi f_c t)$"
+    
+    multiplier_out = tx_signal * local_osc
+    mult_eq = r"$v_{mult}(t) = A_c [1 + k_a m(t)] + A_c [1 + k_a m(t)] \cos(4\pi f_c t)$"
+    
+    rx_filtered = filtfilt(b_lpf, a_lpf, multiplier_out)
+    rx_recovered = rx_filtered - np.mean(rx_filtered)  # Blokir komponen DC
+    if np.max(rx_recovered) > 0:
+        rx_recovered = rx_recovered / np.max(rx_recovered)
+    rec_eq = r"$m_{rec}(t) = \text{LPF}\{v_{mult}(t)\} - V_{DC} \propto m(t)$"
+
+else:  # FM
+    kf = st.sidebar.slider("Sensitivitas Frekuensi kf (Hz/V)", 5, 30, 15)
+    
+    # Transmitter FM
     integral_m = np.cumsum(m_t) / fs
-    tx_signal = np.cos(2 * np.pi * fc * t + 2 * np.pi * kf * integral_m)
+    tx_signal = Ac * np.cos(2 * np.pi * fc * t + 2 * np.pi * kf * integral_m)
+    tx_eq = r"$s(t) = A_c \cos\left(2\pi f_c t + 2\pi k_f \int_0^t m(\tau) d\tau\right)$"
     
-    # 2. Receiver (Diskriminator Frekuensi / Slope Detector)
-    # Turunan sinyal d/dt mengubah variasi frekuensi menjadi variasi amplitudo
-    diff_signal = np.abs(np.diff(tx_signal, prepend=tx_signal[0]))
-    b, a_coeff = butter(4, (2 * fm * 2) / fs, btype='low')
-    rx_recovered = filtfilt(b, a_coeff, diff_signal)
-    rx_recovered = (rx_recovered - np.mean(rx_recovered))
+    # Receiver FM - Slope Detector / Frequency Discriminator
+    diff_signal = np.abs(np.diff(tx_signal, prepend=tx_signal[0])) * (fs / (2 * np.pi * fc))
+    local_osc = np.cos(2 * np.pi * fc * t)
+    local_eq = r"$\text{Referensi Frekuensi Pusat } f_c = " + f"{fc}" + r"\text{ Hz}$"
+    
+    multiplier_out = diff_signal
+    mult_eq = r"$v_{disc}(t) = \left| \frac{d}{dt} s(t) \right| \propto [2\pi f_c + 2\pi k_f m(t)]$"
+    
+    rx_recovered = filtfilt(b_lpf, a_lpf, diff_signal)
+    rx_recovered = rx_recovered - np.mean(rx_recovered)
     if np.max(rx_recovered) > 0:
         rx_recovered = rx_recovered / np.max(rx_recovered)
+    rec_eq = r"$m_{rec}(t) = \text{LPF}\{v_{disc}(t)\} - V_{DC} \propto m(t)$"
 
-    tx_desc = "VCO berputar lebih cepat saat sinyal pesan bernilai positif dan melambat saat negatif secara real-time."
-    rx_desc = "Rangkaian slope/diferensiator mengukur laju putar gelombang sesaat, lalu LPF mengekstrak kembali tegangannya."
+# ==============================================================================
+# PLOTTING GRAFIK LENGKAP
+# ==============================================================================
+fig, axes = plt.subplots(5, 1, figsize=(12, 11), sharex=True)
 
-else: # PM
-    kp = st.sidebar.slider("Deviasi Fasa kp (Radian)", 0.5, 3.14, 1.5)
-    
-    # 1. Transmitter: Sudut fasa digeser langsung proporsional terhadap m(t)
-    tx_signal = np.cos(2 * np.pi * fc * t + kp * m_t)
-    
-    # 2. Receiver (Phase Detector: Mengalikan sinyal RX dengan carrier lokal quadrature)
-    # Menggunakan sinyal acuan lokal tergeser 90 derajat (-sin)
-    local_ref = -np.sin(2 * np.pi * fc * t)
-    mixed = tx_signal * local_ref
-    b, a_coeff = butter(4, (2 * fm * 2) / fs, btype='low')
-    rx_recovered = filtfilt(b, a_coeff, mixed)
-    rx_recovered = (rx_recovered - np.mean(rx_recovered))
-    if np.max(rx_recovered) > 0:
-        rx_recovered = rx_recovered / np.max(rx_recovered)
-
-    tx_desc = f"Rangkaian penunda fasa memajukan/memundurkan sudut carrier sebesar {kp} * m(t) pada detik yang sama."
-    rx_desc = "Detektor Fasa mengalikan sinyal yang datang dengan sinyal osilator lokal untuk mengukur selisih sudut fasa seketika."
-
-# --- TAMPILAN GRAFIK ---
-fig, axes = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
-
-# Plot 1: Sinyal Asli
-axes[0].plot(t, m_t, color='blue', label='m(t) Sinyal Pesan')
-axes[0].set_title("1. Sinyal Informasi Asli (Tegangan Mikrofon / Suara)")
+# 1. Sinyal Pesan
+axes[0].plot(t, m_t, color='blue', lw=1.8)
+axes[0].set_title(f"1. Sinyal Informasi / Pesan Asli: $m(t) = A_m \sin(2\pi f_m t)$", fontsize=12, fontweight='bold')
 axes[0].set_ylabel("Amplitudo (V)")
-axes[0].grid(True, linestyle='--', alpha=0.6)
-axes[0].legend(loc='upper right')
+axes[0].grid(True, linestyle='--', alpha=0.5)
 
-# Plot 2: Carrier Murni
-axes[1].plot(t, carrier, color='gray', linestyle=':', alpha=0.7, label='Carrier Murni (fc)')
-axes[1].set_title(f"2. Gelombang Pembawa Murni ({fc} Hz)")
-axes[1].set_ylabel("Amplitudo")
-axes[1].grid(True, linestyle='--', alpha=0.6)
-axes[1].legend(loc='upper right')
-
-# Plot 3: Sinyal Hasil Modulasi (Transmitter Out)
-axes[2].plot(t, tx_signal, color='red', label='Sinyal Termodulasi')
+# 2. Sinyal Termodulasi (TX Out)
+axes[1].plot(t, tx_signal, color='red', lw=1.2)
 if "AM" in mod_type:
-    envelope_up = 1 + ka * m_t
-    envelope_down = -envelope_up
-    axes[2].plot(t, envelope_up, 'g--', alpha=0.7, label='Envelope Atas')
-    axes[2].plot(t, envelope_down, 'g--', alpha=0.7)
-axes[2].set_title(f"3. Sinyal yang Dipancarkan Antena TX [{tx_desc}]")
-axes[2].set_ylabel("Amplitudo")
-axes[2].grid(True, linestyle='--', alpha=0.6)
-axes[2].legend(loc='upper right')
+    axes[1].plot(t, Ac * (1 + ka * m_t), 'k--', alpha=0.5, label='Envelope')
+    axes[1].plot(t, -Ac * (1 + ka * m_t), 'k--', alpha=0.5)
+    axes[1].legend(loc='upper right')
+axes[1].set_title(f"2. Sinyal Transmisi Termodulasi: {tx_eq}", fontsize=12, fontweight='bold')
+axes[1].set_ylabel("Amplitudo")
+axes[1].grid(True, linestyle='--', alpha=0.5)
 
-# Plot 4: Sinyal Hasil Demodulasi (Receiver Out)
-axes[3].plot(t, rx_recovered, color='green', linewidth=2, label='m_rec(t) Hasil Deteksi')
-axes[3].plot(t, m_t, color='blue', linestyle='--', alpha=0.4, label='Target Asli')
-axes[3].set_title(f"4. Sinyal Keluaran Speaker RX [{rx_desc}]")
-axes[3].set_xlabel("Waktu (detik)")
-axes[3].set_ylabel("Amplitudo (V)")
-axes[3].grid(True, linestyle='--', alpha=0.6)
-axes[3].legend(loc='upper right')
+# 3. Osilator Lokal Receiver
+axes[2].plot(t, local_osc, color='purple', lw=1.2, linestyle='-')
+axes[2].set_title(f"3. Sinyal Pengali Lokal Receiver (Carrier Generator): {local_eq}", fontsize=12, fontweight='bold')
+axes[2].set_ylabel("Amplitudo")
+axes[2].grid(True, linestyle='--', alpha=0.5)
+
+# 4. Hasil Perkalian (Mixer Output / Selisih Fasa & Frekuensi Ganda)
+axes[3].plot(t, multiplier_out, color='darkorange', lw=1.0)
+axes[3].set_title(f"4. Hasil Pengali Mixer: {mult_eq}", fontsize=11, fontweight='bold')
+axes[3].set_ylabel("Tegangan Mixer")
+axes[3].grid(True, linestyle='--', alpha=0.5)
+
+# 5. Sinyal Hasil Demodulasi (Keluaran LPF)
+axes[4].plot(t, rx_recovered, color='green', lw=2.0, label='Sinyal Hasil Demodulasi')
+axes[4].plot(t, m_t / np.max(m_t), color='blue', linestyle='--', alpha=0.4, label='Pesan Target Asli (Normalisasi)')
+axes[4].set_title(f"5. Sinyal Diterima Akhir (Output LPF): {rec_eq}", fontsize=12, fontweight='bold')
+axes[4].set_xlabel("Waktu (detik)")
+axes[4].set_ylabel("Amplitudo")
+axes[4].grid(True, linestyle='--', alpha=0.5)
+axes[4].legend(loc='upper right')
 
 plt.tight_layout()
 st.pyplot(fig)
 
-# --- PENJELASAN MEKANISME REAL-TIME ---
+# ==============================================================================
+# PENJELASAN MATEMATIS DETAIL TENTANG DETEKTOR FASA (PM)
+# ==============================================================================
 st.markdown("---")
-st.subheader("Mekanisme Pengambilan Data Sesaat")
-col1, col2 = st.columns(2)
+st.subheader("Buku Catatan Teknis: Mengapa Pengali Lokal Mengekstrak Fasa Secara Real-Time?")
+st.markdown(r"""
+Pada modulasi fasa, sinyal yang masuk ke antena penerima adalah:
+$$s(t) = A_c \cos(2\pi f_c t + k_p m(t))$$
 
-with col1:
-    st.markdown("**Di Sisi Pemancar (Transmitter):**")
-    st.write(tx_desc)
-    st.info("Nilai tegangan $m(t)$ pada detik itu langsung mengubah fisik sinyal pembawa tanpa harus mengumpulkan sampel berdurasi panjang.")
+Di penerima, sinyal ini langsung dikalikan dengan **osilator lokal** berkondisi kuadratur (berbeda fasa $90^\circ$ atau $-\sin(2\pi f_c t)$):
+$$v_{mult}(t) = \left[ A_c \cos(2\pi f_c t + k_p m(t)) \right] \times \left[ -\sin(2\pi f_c t) \right]$$
 
-with col2:
-    st.markdown("**Di Sisi Penerima (Receiver):**")
-    st.write(rx_desc)
-    st.info("Penerima tidak menunggu gelombang melintasi $x=0$, melainkan memanfaatkan sifat pengisian muatan RC atau filter frekuensi untuk membaca nilai tegangan seketika.")
+Menggunakan identitas trigonometri: $\cos(\alpha)\sin(\beta) = \frac{1}{2}[\sin(\alpha+\beta) - \sin(\alpha-\beta)]$:
+$$v_{mult}(t) = \underbrace{\frac{1}{2} A_c \sin(k_p m(t))}_{\text{Sinyal Baseband (Selisih Fasa)}} - \underbrace{\frac{1}{2} A_c \sin(4\pi f_c t + k_p m(t))}_{\text{Frekuensi Tinggi ganda } 2f_c}$$
+
+* **Komponen Frekuensi Ganda ($2f_c$):** Frekuensinya sangat tinggi (pada grafik 4 terlihat seperti gerigi berosilasi rapat). Komponen ini langsung **dibuang** oleh Low Pass Filter (LPF).
+* **Komponen Baseband:** Untuk deviasi fasa kecil ($k_p m(t) \ll 1\text{ rad}$), berlaku aproksimasi $\sin(\theta) \approx \theta$. Sehingga:
+$$m_{rec}(t) \approx \frac{1}{2} A_c k_p m(t)$$
+Tegangan listrik seketika yang keluar dari filter **berbanding lurus langsung dengan sinyal suara $m(t)$** tanpa harus menunggu gelombang memotong sumbu nol.
+""")
